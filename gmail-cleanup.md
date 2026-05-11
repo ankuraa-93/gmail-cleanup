@@ -16,6 +16,7 @@ You are guiding the user through a complete Gmail inbox cleanup using the Google
 - After completing each major phase, suggest the user run `/clear` to free context.
 - For long-running scans (>5 min), give the user an ETA and run in background.
 - Store command reference, label IDs, filter IDs, and key stats in `progress.md` so they survive context clears.
+- Whenever you start a new session, check the progress file for where the user left off.
 
 ---
 
@@ -46,16 +47,16 @@ The user needs a Google Cloud project with Gmail API enabled and OAuth credentia
 ### 1c. Authenticate
 
 ```bash
-npx @googleworkspace/cli auth login --scope "https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.modify"
+npx @googleworkspace/cli auth login --scope "https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/gmail.settings.basic"
 ```
 
-The auth URL will appear in the terminal. **Open it in the browser for the user if possible** — terminal output may not be copy-pasteable.
+The auth URL will appear in the terminal. **Open it in the browser for the user if possible** — terminal output may not be copy-pasteable. The user will see an "unverified app" warning — they need to click "Advanced" → "Go to app (unsafe)" to proceed.
 
 ### 1d. Ask the user
 
 Before proceeding, ask:
-- "Are there specific types of email you want to keep? For example: job applications, emails with PDF attachments, specific newsletters?"
-- "Are you actively job hunting? I'll make sure to preserve all job-related emails."
+- "Are there specific types of email you want to keep? For example: emails with PDF attachments, specific newsletters, or emails from certain senders?"
+- "Any other preferences I should know about before we start?"
 
 Record their preferences in `progress.md`.
 
@@ -74,78 +75,74 @@ Record: inbox total, inbox unread, trash count, and category breakdown (Primary,
 
 ---
 
-## Phase 2: Inbox Audit
+## Phase 2: Scan & Classify
 
-### 2a. Sender leaderboard (sampled)
+### 2a. Scan last 30 days
 
-Sample 100 message headers per Gmail category to build a sender leaderboard. Use `format: metadata` with `metadataHeaders: ["From", "Subject"]`.
-
-```bash
-# List message IDs
-npx @googleworkspace/cli gmail users messages list --params '{"userId":"me","q":"in:inbox category:updates","maxResults":100}'
-# Get headers for each
-npx @googleworkspace/cli gmail users messages get --params '{"userId":"me","id":"MSG_ID","format":"metadata","metadataHeaders":["From","Subject"]}'
-```
-
-Group senders by domain. Note which senders appear in multiple categories (key insight: the same sender often appears in both Updates AND Personal — you must use category-specific queries).
-
-### 2b. Identify cleanup tiers
-
-Based on the sender leaderboard, create tiers:
-- **Safe bulk-trash**: Senders only in Promotions/Social/Forums with no Personal overlap
-- **Category-specific trash**: Senders in multiple categories — trash from Updates/Promotions but preserve Personal
-- **Review needed**: Forums, newsletters the user might want
-- **Keep**: Personal-only senders, job platforms, senders the user flagged
-
-Present this analysis to the user for approval before proceeding.
-
----
-
-## Phase 3: Classification Scan
-
-### 3a. Last 30 days deep scan
-
-Scan the last 30 days of inbox emails to get From + Subject for every message:
+Scan the last 30 days of inbox emails to get From + Subject for every message. **Cap at 5000 emails** — if the inbox has more than 5000 messages in the last 30 days, scan only the first 5000 to keep the process manageable.
 
 ```bash
-npx @googleworkspace/cli gmail users messages list --params '{"userId":"me","q":"in:inbox newer_than:30d","maxResults":500}' --page-all --page-limit 20
+npx @googleworkspace/cli gmail users messages list --params '{"userId":"me","q":"in:inbox newer_than:30d","maxResults":500}' --page-all --page-limit 10
 ```
 
-Then fetch headers for each message. **Give the user an ETA** — at ~10 requests/second, 500 emails takes ~1 minute.
+Then fetch headers for each message using `format: metadata` with `metadataHeaders: ["From", "Subject"]`.
 
-### 3b. Classify senders
+**Give the user an ETA** — at ~10 requests/second, 500 emails takes ~1 minute. If the scan will take longer than 5 minutes, tell the user they can come back in the estimated time.
 
-For every sender domain, classify as:
-- **RELEVANT** — personal, job-related, financial, travel, government, content the user subscribed to
+Note: `in:inbox` includes all Gmail category tabs (Primary, Updates, Social, Promotions, Forums) — no need to scan categories separately.
+
+### 2b. Classify senders
+
+Group messages by sender domain. For every sender, use the email subjects to classify as:
+- **RELEVANT** — personal, financial, travel, government, content the user subscribed to
 - **STATUS UPDATE** — order confirmations, shipping, transaction alerts, OTPs, receipts
 - **PROMO** — marketing, upsells, engagement bait, surveys, newsletters the user doesn't want
 - **SPAM** — unsolicited, scammy
+- **REQUIRES REVIEW** — mixed signals from the same sender (e.g., both transactional and promotional emails), or emails you're not confident about
 
-### 3c. Export to file
+### 2c. Export to file
 
-Write the classification to a file (e.g., `sender_classification.md`) with two sections: RELEVANT and PROMO. Include sender domain, email count, and a brief description of what they're sending.
+Write the classification to `sender_classification.txt` with sections for each category. Use a simple plain-text format — one sender per line with count and description. Easy to edit in any text editor.
 
-```markdown
-## RELEVANT
-| Sender | Count | What they're sending |
-|--------|-------|---------------------|
-| ...    | ...   | ...                 |
+```
+========== RELEVANT ==========
+(These senders will be left alone)
 
-## PROMO
-| Sender | Count | What they're sending |
-|--------|-------|---------------------|
-| ...    | ...   | ...                 |
+amazon.in (50) — Order deliveries, shipping updates
+axis.bank.in (94) — Debit/credit alerts, monthly statements
+
+========== STATUS UPDATE ==========
+(These senders will be labeled "Status Updates" and archived out of inbox)
+
+razorpay.com (6) — Payment confirmations, refund tracking
+delhivery.com (7) — Delivery tracking
+
+========== PROMO ==========
+(These senders will be trashed)
+
+mailers.hdfcbank.bank.in (19) — Bank cross-selling, "LIFETIME FREE 2nd Card"
+info.bigbasket.com (6) — Recipe contests, promos
+
+========== SPAM ==========
+(These senders will be trashed)
+
+...
+
+========== REQUIRES REVIEW ==========
+(Move these to another section before proceeding)
+
+uber.com (24) — Mix of trip receipts and "25% off" promos
 ```
 
-Tell the user: "Edit this file to move senders between sections, then let me know when you're done."
+Tell the user: "Edit this file to move senders between sections, then let me know when you're done. Senders in PROMO and SPAM will be trashed. STATUS UPDATE senders will be labeled and archived out of your inbox. RELEVANT senders will be left alone."
 
 ---
 
-## Phase 4: Cleanup Execution
+## Phase 3: Cleanup
 
 Only proceed after the user approves the classification file.
 
-### 4a. Create "Status Updates" label
+### 3a. Create "Status Updates" label
 
 ```bash
 npx @googleworkspace/cli gmail users labels create --params '{"userId":"me"}' --json '{"name":"Status Updates","labelListVisibility":"labelShow","messageListVisibility":"show"}'
@@ -153,22 +150,26 @@ npx @googleworkspace/cli gmail users labels create --params '{"userId":"me"}' --
 
 Save the label ID in `progress.md`.
 
-### 4b. Execute cleanup in this order
+### 3b. Execute cleanup
 
-1. **Promotions**: Trash all emails in `category:promotions`
-2. **Social**: Trash non-essential social (e.g., `in:inbox category:social -from:linkedin.com`)
-3. **Forums**: Trash non-essential forums, keeping any the user flagged
-4. **Updates — trash bucket**: Trash newsletters, digests, marketing disguised as updates
-5. **Updates — status bucket**: Label as "Status Updates" + remove from inbox (archive). Use `batchModify`:
+Work through the classification file:
+
+1. **PROMO + SPAM**: Trash all emails from these senders using `batchModify`:
+
+```bash
+npx @googleworkspace/cli gmail users messages batchModify --params '{"userId":"me"}' --json '{"ids":["id1","id2",...],"removeLabelIds":["INBOX"],"addLabelIds":["TRASH"]}'
+```
+
+2. **STATUS UPDATE**: Label as "Status Updates" + remove from inbox (archive):
 
 ```bash
 npx @googleworkspace/cli gmail users messages batchModify --params '{"userId":"me"}' --json '{"ids":["id1","id2",...],"removeLabelIds":["INBOX"],"addLabelIds":["Label_ID"]}'
 ```
 
-6. **Updates — keep bucket**: Leave job-related and user-flagged emails alone
-7. **Personal**: Skip entirely
+3. **RELEVANT**: Leave alone
+4. **REQUIRES REVIEW**: Leave alone — treat as RELEVANT if the user didn't move them.
 
-### 4c. Create Gmail filter for Status Updates
+### 3c. Create Gmail filter for Status Updates
 
 Auto-label + skip inbox for future emails from status update senders:
 
@@ -179,23 +180,6 @@ npx @googleworkspace/cli gmail users settings filters create --params '{"userId"
 }'
 ```
 
-Note: Adding `gmail.settings.basic` scope is required for filter management. If not already authorized, guide the user to re-auth with the additional scope.
-
-### 4d. Record results
-
-Update `progress.md` with:
-- Emails trashed per step
-- Emails labeled + archived
-- Total removed from inbox
-- Before/after inbox counts
-- Filter ID and sender patterns
-
----
-
-## Phase 5: Promo Sweep (optional refinement)
-
-After the bulk cleanup, scan the last 30 days again in both inbox AND Status Updates to catch promo senders that slipped through. Follow the same classify-to-file-then-act pattern.
-
 If promo subdomains share a base domain with legitimate senders (e.g., `mailers.hdfcbank.bank.in` is promo but `hdfcbank.bank.in` is transactional), use the filter's `negatedQuery` field to exclude them:
 
 ```json
@@ -205,13 +189,23 @@ If promo subdomains share a base domain with legitimate senders (e.g., `mailers.
 }
 ```
 
+### 3d. Record results
+
+Update `progress.md` with:
+- Emails trashed (count per sender)
+- Emails labeled + archived
+- Total removed from inbox
+- Before/after inbox counts
+- Filter ID and sender patterns
+- Label ID
+
 ---
 
-## Phase 6: Unsubscribe
+## Phase 4: Unsubscribe
 
-### 6a. Scan trash for unsubscribe links
+### 4a. Scan trash for unsubscribe links
 
-Fetch `From` and `List-Unsubscribe` headers from trashed messages. For large trash (>5000), use a random sample of 5000 messages to keep scan time reasonable (~8 min).
+Fetch `From`, `List-Unsubscribe`, and `List-Unsubscribe-Post` headers from trashed messages. For large trash (>5000), use a **random sample of 5000 messages** to keep scan time reasonable (~8 min).
 
 ```bash
 npx @googleworkspace/cli gmail users messages get --params '{"userId":"me","id":"MSG_ID","format":"metadata","metadataHeaders":["From","List-Unsubscribe","List-Unsubscribe-Post"]}'
@@ -219,11 +213,11 @@ npx @googleworkspace/cli gmail users messages get --params '{"userId":"me","id":
 
 Group by sender domain. For each domain, capture the first `List-Unsubscribe` URL found.
 
-### 6b. Present unsubscribe list
+### 4b. Present unsubscribe list
 
 Show the user the list of senders with unsubscribe links. Ask if any should be excluded (senders they actually want to keep hearing from).
 
-### 6c. Auto-unsubscribe
+### 4c. Auto-unsubscribe
 
 For senders with `List-Unsubscribe-Post` header (RFC 8058 one-click):
 
@@ -237,7 +231,7 @@ curl -s -o /dev/null -w '%{http_code}' -X POST \
 
 HTTP 200/202/204 = success. Track results.
 
-### 6d. Manual unsubscribe list
+### 4d. Manual unsubscribe list
 
 Create `manual_unsubscribe.md` for senders that couldn't be auto-unsubscribed:
 - Failed one-click POST (server rejected)
@@ -248,9 +242,9 @@ Include the clickable URL for each so the user can open them in a browser.
 
 ---
 
-## Phase 7: Final Summary
+## Phase 5: Summary
 
-Present a complete summary:
+Present a complete summary with before/after stats:
 
 ```
 ## Gmail Cleanup Summary
@@ -272,12 +266,20 @@ Present a complete summary:
 
 ### Files
 - progress.md — full progress tracker
-- sender_classification.md — sender classifications
+- sender_classification.txt — sender classifications
 - full_unsubscribe_list.md — all unsubscribe links
 - manual_unsubscribe.md — links for manual unsubscribe
 ```
 
 Capture final label counts from the Gmail API for accurate before/after comparison.
+
+---
+
+## Known gws CLI Gotchas
+
+- **NDJSON output**: When using `--page-all`, the gws CLI outputs one JSON object per page (NDJSON), not a single JSON array. You must parse each object separately — use `json.JSONDecoder().raw_decode()` in a loop, not `json.loads()` on the full output.
+- **`--json` not `--body`**: The gws CLI uses `--json` to pass request body data. Do NOT use `--body` — it will error with "unexpected argument."
+- **Gmail `from:` is substring**: `from:bigbasket.com` matches both `bigbasket.com` and `info.bigbasket.com`. Use `negatedQuery` in filters to exclude promo subdomains that share a base domain with legitimate senders.
 
 ---
 

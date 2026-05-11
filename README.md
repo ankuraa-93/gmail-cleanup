@@ -64,7 +64,7 @@ Claude will guide you through each phase. You can stop at any point — progress
 | File | Purpose |
 |------|---------|
 | `progress.md` | Full progress tracker — stats, label IDs, filter IDs, next steps |
-| `sender_classification.md` | Every sender classified as RELEVANT or PROMO (editable) |
+| `sender_classification.txt` | Every sender classified as RELEVANT or PROMO (editable in any text editor) |
 | `full_unsubscribe_list.md` | All senders with unsubscribe links from trash scan |
 | `manual_unsubscribe.md` | Senders that need manual unsubscribe (clickable URLs) |
 
